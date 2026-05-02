@@ -3,11 +3,12 @@ import pandas as pd
 import psycopg2
 import requests
 from sklearn.ensemble import RandomForestClassifier
+import itertools # 新增：用于计算串关排列组合
 
 # ================= 1. 页面 UI 初始化 =================
 st.set_page_config(page_title="AI 足球量化投注看板", page_icon="⚽", layout="wide")
-st.title("⚽ 智能足球量化投注看板 (全欧联赛版)")
-st.markdown("通过结合 **Elo 战力模型** 与 **The Odds API 实时盘口**，自动寻找预期收益率 (EV) 大于 0 的价值投注机会。")
+st.title("⚽ 智能足球量化投注看板 (全欧联赛+竞彩精算版)")
+st.markdown("通过结合 **Elo 战力模型** 与 **The Odds API 实时盘口**，自动寻找价值投注，并支持竞彩 2串1/3串1 与扣税收益重估。")
 
 # 从云端安全环境中读取秘密 Key
 DB_URI = st.secrets["DB_URI"]
@@ -61,14 +62,12 @@ model, classes, elo_dict = load_and_train_model()
 
 # ================= 3. 博彩数学计算器 =================
 def calculate_ev(prob, odds): return (prob * odds) - 1
-def calculate_kelly(prob, odds, fraction=0.25):
-    b = odds - 1
-    kelly = (prob * b - (1 - prob)) / b
-    return max(0, kelly * fraction)
 
 # ================= 4. 实时盘口侦察与页面展示 =================
 st.sidebar.header("⚙️ 侦察设置")
-selected_league = st.sidebar.selectbox("选择要侦察的联赛:", [
+
+# 定义支持的联赛列表
+league_options = [
     "soccer_epl (英超)", 
     "soccer_spain_la_liga (西甲)", 
     "soccer_germany_bundesliga (德甲)", 
@@ -78,40 +77,56 @@ selected_league = st.sidebar.selectbox("选择要侦察的联赛:", [
     "soccer_netherlands_eredivisie (荷甲)", 
     "soccer_portugal_primeira_liga (葡超)", 
     "soccer_efl_champ (英冠)"
-])
-league_key = selected_league.split(" ")[0]
+]
 
-# --- 使用 session_state 缓存数据和按钮状态 ---
+# 新增：一键扫描所有联赛选项
+selected_league = st.sidebar.selectbox("选择要侦察的联赛:", ["🌟 全部核心联赛 (一键扫描)"] + league_options)
+
 if st.sidebar.button("🚀 一键预测今日赛事"):
     st.session_state['predict_clicked'] = True
-    url = f"https://api.the-odds-api.com/v4/sports/{league_key}/odds/?apiKey={ODDS_API_KEY}&regions=eu&markets=h2h"
+    st.session_state['matches_data'] = []
     
-    with st.spinner('正在连线欧洲博彩公司获取实时赔率...'):
+    # 判断是单联赛还是全联赛
+    if "全部核心联赛" in selected_league:
+        leagues_to_fetch = [l.split(" ")[0] for l in league_options]
+        st.sidebar.warning("注意：全盘扫描将一次性消耗 9 次 API 请求额度。")
+    else:
+        leagues_to_fetch = [selected_league.split(" ")[0]]
+    
+    # 进度条设计
+    progress_text = "正在连线欧洲博彩公司..."
+    my_bar = st.progress(0, text=progress_text)
+    
+    all_fetched_matches = []
+    for i, l_key in enumerate(leagues_to_fetch):
+        url = f"https://api.the-odds-api.com/v4/sports/{l_key}/odds/?apiKey={ODDS_API_KEY}&regions=eu&markets=h2h"
         resp = requests.get(url)
         if resp.status_code == 200:
-            st.session_state['matches_data'] = resp.json()
-        else:
-            st.session_state['matches_data'] = None
-            st.error(f"获取 API 数据失败: {resp.status_code}")
+            all_fetched_matches.extend(resp.json())
+        my_bar.progress((i + 1) / len(leagues_to_fetch), text=f"正在拉取 {l_key} 数据...")
+    
+    my_bar.empty()
+    st.session_state['matches_data'] = all_fetched_matches
 
 # 只要点击过按钮，且缓存里有数据，执行以下渲染逻辑
 if st.session_state.get('predict_clicked', False) and st.session_state.get('matches_data') is not None:
-    st.subheader("📡 实时盘口侦察报告")
+    st.subheader("📡 实时盘口侦察报告 (单场分析)")
     matches = st.session_state['matches_data']
     
+    # 建立一个“购物车”，专门存放竞彩验证依然 EV>0 的比赛
+    valid_jc_matches = []
+    
     if not matches:
-        st.info("🤷 目前该联赛没有即将开打的比赛盘口。")
+        st.info("🤷 目前所选联赛没有即将开打的比赛盘口。")
     else:
         for match in matches:
-            # 提取数据
             home_team, away_team = match['home_team'], match['away_team']
             try:
                 bookmaker = match['bookmakers'][0]
                 home_odds = next(item['price'] for item in bookmaker['markets'][0]['outcomes'] if item['name'] == home_team)
             except:
-                continue # 找不到赔率则跳过
+                continue 
             
-            # AI 计算
             ht_elo = elo_dict.get(home_team, 1500)
             at_elo = elo_dict.get(away_team, 1500)
             
@@ -120,38 +135,101 @@ if st.session_state.get('predict_clicked', False) and st.session_state.get('matc
             home_win_prob = probs[list(classes).index('HomeWin')]
             
             ev = calculate_ev(home_win_prob, home_odds)
-            kelly = calculate_kelly(home_win_prob, home_odds)
             
-            # 渲染 UI 卡片 (包含您的竞彩验证逻辑)
-            with st.container():
-                st.markdown(f"### {home_team} (主) vs {away_team}")
-                col1, col2, col3 = st.columns(3)
-                col1.metric(label=f"国际初盘 ({bookmaker['title']})", value=f"{home_odds}")
-                col2.metric(label="AI 算出真实主胜率", value=f"{home_win_prob*100:.1f}%")
-                
-                if ev > 0:
-                    col3.success(f"🔥 国际盘发现价值 (EV: +{ev*100:.1f}%)")
+            # 只显示国际盘有价值的比赛，过滤掉垃圾比赛
+            if ev > 0:
+                with st.container():
+                    st.markdown(f"### ⚽ {home_team} (主) vs {away_team}")
+                    col1, col2, col3 = st.columns(3)
+                    col1.metric(label=f"国际初盘 ({bookmaker['title']})", value=f"{home_odds}")
+                    col2.metric(label="AI 主胜率", value=f"{home_win_prob*100:.1f}%")
+                    col3.success(f"🔥 国际盘有价值 (EV: +{ev*100:.1f}%)")
                     
-                    # 中国竞彩二次验算模块
-                    with st.expander("🇨🇳 点击进行【竞彩真实收益】二次验算", expanded=True):
-                        st.caption("提示：由于竞彩抽水较高，国际盘有价值的比赛，在竞彩不一定有价值。")
+                    with st.expander("🇨🇳 竞彩真实收益二次验算", expanded=True):
                         unique_key = f"jc_{home_team}_{away_team}"
-                        
                         jingcai_odds = st.number_input(
-                            f"👉 请输入体彩店当前开出的【{home_team} 胜】赔率：", 
-                            min_value=1.01, 
-                            step=0.01, 
+                            f"👉 输入体彩店【{home_team} 胜】赔率：", 
+                            min_value=1.01, step=0.01, 
                             value=max(1.01, float(home_odds) - 0.20), 
                             key=unique_key
                         )
-                        
                         jc_ev = calculate_ev(home_win_prob, jingcai_odds)
-                        jc_kelly = calculate_kelly(home_win_prob, jingcai_odds)
                         
                         if jc_ev > 0:
-                            st.success(f"✅ 竞彩依然有投资价值！\n\n **竞彩预期收益率 (EV)**: +{jc_ev*100:.2f}% \n\n **凯利公式建议仓位**: 拿出总本金的 **{jc_kelly*100:.2f}%** 去体彩店下注！")
+                            st.success(f"✅ 竞彩单关合格 (EV: +{jc_ev*100:.2f}%)，已自动加入下方串关精算池！")
+                            # 将合格的比赛加入购物车
+                            valid_jc_matches.append({
+                                'match_name': f"{home_team} 胜",
+                                'prob': home_win_prob,
+                                'odds': jingcai_odds
+                            })
                         else:
-                            st.error(f"❌ 警告：竞彩抽水过高，价值已被吞噬！\n\n **竞彩预期收益率 (EV)**: {jc_ev*100:.2f}% (长期必亏) \n\n **系统指令**: 坚决放弃下注！")
-                else:
-                    col3.error(f"❌ 国际盘无投资价值，直接放弃 (EV: {ev*100:.1f}%)")
-                st.divider()
+                            st.error(f"❌ 竞彩抽水过高，放弃 (EV: {jc_ev*100:.2f}%)")
+                    st.divider()
+
+    # ================= 5. 竞彩串关精算与避税模块 =================
+    if len(valid_jc_matches) >= 2:
+        st.header("🔗 竞彩串关智能精算 (自动组合验证池)")
+        st.markdown("以下组合均由上方**竞彩验证合格**的单场比赛自动交叉组合而成。")
+        
+        # 扣税开关
+        apply_tax = st.toggle("💸 模拟大额中奖扣税 (若单注奖金超过3000元，强制扣除20%所得税)")
+        tax_multiplier = 0.8 if apply_tax else 1.0
+        
+        col_2, col_3 = st.columns(2)
+        
+        # --- 2串1 分析 ---
+        with col_2:
+            st.subheader("🔥 推荐 2串1 组合")
+            combos_2 = list(itertools.combinations(valid_jc_matches, 2))
+            valid_2_count = 0
+            
+            for combo in combos_2:
+                combo_prob = combo[0]['prob'] * combo[1]['prob']
+                combo_odds = combo[0]['odds'] * combo[1]['odds']
+                
+                # 扣税计算
+                effective_odds = combo_odds * tax_multiplier
+                combo_ev = calculate_ev(combo_prob, effective_odds)
+                
+                if combo_ev > 0:
+                    valid_2_count += 1
+                    with st.container(border=True):
+                        st.markdown(f"**[1]** {combo[0]['match_name']}  \n**[2]** {combo[1]['match_name']}")
+                        st.markdown(f"**综合胜率**: {combo_prob*100:.1f}% | **综合赔率**: {combo_odds:.2f}")
+                        if apply_tax:
+                            st.warning(f"🧾 税后赔率: {effective_odds:.2f} | **税后 EV**: +{combo_ev*100:.2f}%")
+                        else:
+                            st.success(f"📈 **预期收益 (EV)**: +{combo_ev*100:.2f}%")
+                            
+            if valid_2_count == 0:
+                st.error("开启扣税后，没有任何 2串1 组合具备投资价值！请降低预期或减小注水避免超 3000 元。")
+
+        # --- 3串1 分析 ---
+        with col_3:
+            st.subheader("🚀 推荐 3串1 组合")
+            if len(valid_jc_matches) >= 3:
+                combos_3 = list(itertools.combinations(valid_jc_matches, 3))
+                valid_3_count = 0
+                
+                for combo in combos_3:
+                    combo_prob = combo[0]['prob'] * combo[1]['prob'] * combo[2]['prob']
+                    combo_odds = combo[0]['odds'] * combo[1]['odds'] * combo[2]['odds']
+                    
+                    effective_odds = combo_odds * tax_multiplier
+                    combo_ev = calculate_ev(combo_prob, effective_odds)
+                    
+                    if combo_ev > 0:
+                        valid_3_count += 1
+                        with st.container(border=True):
+                            st.markdown(f"**[1]** {combo[0]['match_name']}  \n**[2]** {combo[1]['match_name']}  \n**[3]** {combo[2]['match_name']}")
+                            st.markdown(f"**综合胜率**: {combo_prob*100:.1f}% | **综合赔率**: {combo_odds:.2f}")
+                            if apply_tax:
+                                st.warning(f"🧾 税后赔率: {effective_odds:.2f} | **税后 EV**: +{combo_ev*100:.2f}%")
+                            else:
+                                st.success(f"📈 **预期收益 (EV)**: +{combo_ev*100:.2f}%")
+                
+                if valid_3_count == 0:
+                    st.error("开启扣税后，没有任何 3串1 组合具备投资价值！")
+            else:
+                st.info("合格的单场比赛不足 3 场，无法生成 3串1 组合。")
