@@ -86,7 +86,7 @@ selected_league = st.sidebar.selectbox("选择要侦察的联赛:", [
 ])
 league_key = selected_league.split(" ")[0]
 
-# --- 修复核心：使用 session_state 缓存数据和按钮状态 ---
+# --- 使用 session_state 缓存数据和按钮状态 ---
 if st.sidebar.button("🚀 一键预测今日赛事"):
     st.session_state['predict_clicked'] = True
     url = f"https://api.the-odds-api.com/v4/sports/{league_key}/odds/?apiKey={ODDS_API_KEY}&regions=eu&markets=h2h"
@@ -99,7 +99,7 @@ if st.sidebar.button("🚀 一键预测今日赛事"):
             st.session_state['matches_data'] = None
             st.error(f"获取 API 数据失败: {resp.status_code}")
 
-# 只要点击过按钮，且缓存里有数据，这个 if 就会一直成立，不会因为修改输入框而消失
+# 只要点击过按钮，且缓存里有数据，执行以下渲染逻辑
 if st.session_state.get('predict_clicked', False) and st.session_state.get('matches_data') is not None:
     st.subheader("📡 实时盘口侦察报告")
     matches = st.session_state['matches_data']
