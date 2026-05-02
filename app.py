@@ -143,7 +143,8 @@ if st.session_state.get('predict_clicked', False) and st.session_state.get('matc
                 col3.markdown(f"AI胜率: `{vm['prob']*100:.1f}%` <br>国际EV: <span style='color:#2e7d32'>+{vm['ev']*100:.1f}%</span>", unsafe_allow_html=True)
                 
                 default_jc = max(1.01, float(vm['home_odds']) - 0.20)
-                col4.number_input("🇨🇳 竞彩主胜赔率", min_value=1.01, step=0.01, value=default_jc, key=vm['unique_key'], label_visibility="collapsed")
+# 将 min_value 改为 0.00，并显示文字提示用户未开售填0
+col4.number_input("🇨🇳 竞彩赔率 (未开售填0)", min_value=0.00, step=0.01, value=default_jc, key=vm['unique_key'])
                 st.divider()
                 
             submitted = st.form_submit_button("⚙️ 确认以上赔率，生成竞彩【串关精算报告】", type="primary")
