@@ -3,7 +3,6 @@ import pandas as pd
 import psycopg2
 import requests
 from sklearn.ensemble import RandomForestClassifier
-from datetime import datetime
 
 # ================= 1. 页面 UI 初始化 =================
 st.set_page_config(page_title="AI 足球量化投注看板", page_icon="⚽", layout="wide")
@@ -15,7 +14,6 @@ DB_URI = st.secrets["DB_URI"]
 ODDS_API_KEY = st.secrets["ODDS_API_KEY"]
 
 # ================= 2. 核心算法与模型缓存 =================
-# 使用缓存机制：防止每次刷新网页都要重新算一遍9000场比赛
 @st.cache_resource(show_spinner="⏳ 正在加载历史数据并唤醒 AI 大脑，请稍候...")
 def load_and_train_model():
     conn = psycopg2.connect(DB_URI)
@@ -23,7 +21,6 @@ def load_and_train_model():
     df = pd.read_sql_query(query, conn)
     conn.close()
 
-    # 计算 Elo
     def get_expected_score(ra, rb): return 1 / (1 + 10 ** ((rb - ra) / 400))
     elo_dict = {}
     home_elo, away_elo = [], []
@@ -37,7 +34,6 @@ def load_and_train_model():
         home_elo.append(cur_ht_elo)
         away_elo.append(cur_at_elo)
         
-        # 简化版 Elo 更新
         ea = get_expected_score(cur_ht_elo, cur_at_elo)
         actual_a = 1 if row['home_score'] > row['away_score'] else (0.5 if row['home_score'] == row['away_score'] else 0)
         elo_dict[ht] = cur_ht_elo + 20 * (actual_a - ea)
@@ -61,7 +57,6 @@ def load_and_train_model():
     
     return model, model.classes_, elo_dict
 
-# 唤醒 AI 大脑
 model, classes, elo_dict = load_and_train_model()
 
 # ================= 3. 博彩数学计算器 =================
@@ -160,5 +155,3 @@ if st.session_state.get('predict_clicked', False) and st.session_state.get('matc
                 else:
                     col3.error(f"❌ 国际盘无投资价值，直接放弃 (EV: {ev*100:.1f}%)")
                 st.divider()
-    else:
-        st.error(f"获取 API 数据失败: {resp.status_code}")
