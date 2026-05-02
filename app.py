@@ -65,17 +65,11 @@ def calculate_ev(prob, odds): return (prob * odds) - 1
 
 # ================= 4. 实时盘口侦察与页面展示 =================
 st.sidebar.header("⚙️ 侦察设置")
-
-# 已将 "soccer_efl_champ (英冠)" 从下方列表中彻底删除
+# 已剔除英冠
 league_options = [
-    "soccer_epl (英超)", 
-    "soccer_spain_la_liga (西甲)", 
-    "soccer_germany_bundesliga (德甲)", 
-    "soccer_italy_serie_a (意甲)", 
-    "soccer_france_ligue_one (法甲)", 
-    "soccer_uefa_champs_league (欧冠)", 
-    "soccer_netherlands_eredivisie (荷甲)", 
-    "soccer_portugal_primeira_liga (葡超)"
+    "soccer_epl (英超)", "soccer_spain_la_liga (西甲)", "soccer_germany_bundesliga (德甲)", 
+    "soccer_italy_serie_a (意甲)", "soccer_france_ligue_one (法甲)", "soccer_uefa_champs_league (欧冠)", 
+    "soccer_netherlands_eredivisie (荷甲)", "soccer_portugal_primeira_liga (葡超)"
 ]
 
 selected_league = st.sidebar.selectbox("选择要侦察的联赛:", ["🌟 全部核心联赛 (一键扫描)"] + league_options)
@@ -86,7 +80,7 @@ if st.sidebar.button("🚀 一键提取国际盘高价值比赛"):
     
     if "全部核心联赛" in selected_league:
         leagues_to_fetch = [l.split(" ")[0] for l in league_options]
-        st.sidebar.warning("全盘扫描将一次性消耗 9 次 API 额度。")
+        st.sidebar.warning(f"全盘扫描将一次性消耗 {len(leagues_to_fetch)} 次 API 额度。")
     else:
         leagues_to_fetch = [selected_league.split(" ")[0]]
     
@@ -143,14 +137,13 @@ if st.session_state.get('predict_clicked', False) and st.session_state.get('matc
                 col3.markdown(f"AI胜率: `{vm['prob']*100:.1f}%` <br>国际EV: <span style='color:#2e7d32'>+{vm['ev']*100:.1f}%</span>", unsafe_allow_html=True)
                 
                 default_jc = max(1.01, float(vm['home_odds']) - 0.20)
-# 将 min_value 改为 0.00，并显示文字提示用户未开售填0
-col4.number_input("🇨🇳 竞彩赔率 (未开售填0)", min_value=0.00, step=0.01, value=default_jc, key=vm['unique_key'])
+                # 修改后的代码：允许输入0.00，提示未开售填0
+                col4.number_input("🇨🇳 竞彩赔率 (未开售填0)", min_value=0.00, step=0.01, value=default_jc, key=vm['unique_key'])
                 st.divider()
                 
             submitted = st.form_submit_button("⚙️ 确认以上赔率，生成竞彩【串关精算报告】", type="primary")
 
         # ================= 5. 竞彩串关精算与避税模块 (极速渲染版) =================
-        # 只要表单被渲染过，我们就可以从 session_state 提取数据计算
         valid_jc_matches = []
         for vm in intl_val_matches:
             # 获取用户填写的竞彩赔率（默认取国际盘-0.2）
@@ -180,7 +173,6 @@ col4.number_input("🇨🇳 竞彩赔率 (未开售填0)", min_value=0.00, step=
                     c_ev = calculate_ev(c_prob, eff_odds)
                     if c_ev > 0: combos_2.append({'combo': combo, 'prob': c_prob, 'odds': c_odds, 'eff_odds': eff_odds, 'ev': c_ev})
                 
-                # 核心优化：按 EV 排序，只渲染前 20 个！绝不卡顿！
                 combos_2.sort(key=lambda x: x['ev'], reverse=True)
                 for c in combos_2[:20]:
                     with st.container(border=True):
@@ -201,7 +193,6 @@ col4.number_input("🇨🇳 竞彩赔率 (未开售填0)", min_value=0.00, step=
                         c_ev = calculate_ev(c_prob, eff_odds)
                         if c_ev > 0: combos_3.append({'combo': combo, 'prob': c_prob, 'odds': c_odds, 'eff_odds': eff_odds, 'ev': c_ev})
                     
-                    # 同样只渲染前 20 个最高收益组合
                     combos_3.sort(key=lambda x: x['ev'], reverse=True)
                     for c in combos_3[:20]:
                         with st.container(border=True):
