@@ -4,11 +4,12 @@ import psycopg2
 import requests
 from sklearn.ensemble import RandomForestClassifier
 import itertools
+from datetime import datetime, timedelta, timezone # 新增：导入时间处理库
 
 # ================= 1. 页面 UI 初始化 =================
 st.set_page_config(page_title="AI 足球量化投注看板", page_icon="⚽", layout="wide")
-st.title("⚽ 智能足球量化投注看板 (全向精算版)")
-st.markdown("结合 **Elo 战力模型** 与实时盘口，全向评估【胜/平/负】价值。串关推荐已优化为**胜率优先**排序。")
+st.title("⚽ 智能足球量化投注看板 (全向精算+限时过滤版)")
+st.markdown("结合 **Elo 战力模型** 与实时盘口，全向评估【胜/平/负】价值。系统已自动过滤超过**两日后**的远期赛事。")
 
 # 从云端安全环境中读取秘密 Key
 DB_URI = st.secrets["DB_URI"]
@@ -95,25 +96,44 @@ if st.sidebar.button("🚀 一键提取国际盘高价值比赛"):
     my_bar.empty()
     st.session_state['matches_data'] = all_fetched_matches
 
-# --- 核心优化区：三向评估 (胜/平/负) ---
+# --- 核心优化区：三向评估 + 时间拦截 ---
 if st.session_state.get('predict_clicked', False) and st.session_state.get('matches_data') is not None:
-    st.subheader("📡 第一阶段：国际盘价值初筛 (胜/平/负全向扫描)")
+    st.subheader("📡 第一阶段：国际盘价值初筛 (近期赛事锁定)")
     matches = st.session_state['matches_data']
+    
+    # === 时间计算模块：计算北京时间今日及后两日的边界 ===
+    tz_bj = timezone(timedelta(hours=8)) # 设定北京时间 UTC+8
+    now_bj = datetime.now(tz_bj)
+    # 计算“后两日”的最后期限 (即明天的明天，深夜 23:59:59)
+    threshold_bj = (now_bj + timedelta(days=2)).replace(hour=23, minute=59, second=59)
     
     intl_val_matches = []
     for match in matches:
+        # === 拦截模块：过滤掉超过规定时间窗口的远期比赛 ===
+        try:
+            # 提取 API 时间并转为北京时间
+            match_time_utc = datetime.strptime(match['commence_time'], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+            match_time_bj = match_time_utc.astimezone(tz_bj)
+            
+            # 如果开球时间大于后天深夜，直接抛弃！
+            if match_time_bj > threshold_bj:
+                continue 
+                
+            # 如果合格，顺便格式化一个好看的时间准备展示给用户
+            match_time_str = match_time_bj.strftime("%m-%d %H:%M")
+        except Exception:
+            match_time_str = "时间未知" # 若 API 缺失时间字段，做容错处理
+            
         home_team, away_team = match['home_team'], match['away_team']
         try:
             bookmaker = match['bookmakers'][0]
             outcomes = bookmaker['markets'][0]['outcomes']
             
-            # 安全提取三个选项的赔率
             home_odds = next((item['price'] for item in outcomes if item['name'] == home_team), 0)
             away_odds = next((item['price'] for item in outcomes if item['name'] == away_team), 0)
             draw_odds = next((item['price'] for item in outcomes if item['name'] == 'Draw'), 0)
         except: continue 
         
-        # AI 计算三向胜率
         ht_elo, at_elo = elo_dict.get(home_team, 1500), elo_dict.get(away_team, 1500)
         features = pd.DataFrame({'home_elo': [ht_elo], 'away_elo': [at_elo], 'elo_diff': [ht_elo - at_elo]})
         probs = model.predict_proba(features)[0]
@@ -122,12 +142,10 @@ if st.session_state.get('predict_clicked', False) and st.session_state.get('matc
         prob_away = probs[list(classes).index('AwayWin')]
         prob_draw = probs[list(classes).index('Draw')]
         
-        # 计算三向 EV
         ev_home = calculate_ev(prob_home, home_odds) if home_odds else -1
         ev_away = calculate_ev(prob_away, away_odds) if away_odds else -1
         ev_draw = calculate_ev(prob_draw, draw_odds) if draw_odds else -1
         
-        # 挑选出最有价值的选项 (EV最大且大于0的选项)
         best_ev = 0
         best_choice = None
         
@@ -141,6 +159,7 @@ if st.session_state.get('predict_clicked', False) and st.session_state.get('matc
         if best_choice:
             intl_val_matches.append({
                 'home_team': home_team, 'away_team': away_team,
+                'match_time_str': match_time_str, # 将比赛时间存入列表
                 'bookmaker': bookmaker['title'], 
                 'target_label': best_choice['label'],
                 'target_odds': best_choice['odds'],
@@ -149,14 +168,15 @@ if st.session_state.get('predict_clicked', False) and st.session_state.get('matc
             })
 
     if not intl_val_matches:
-        st.info("🤷 目前所选联赛中，没有发现国际盘具备投资价值的比赛。")
+        st.info("🤷 目前符合条件的比赛中（不含两日后远期比赛），没有发现国际盘具备投资价值的比赛。")
     else:
         with st.form("jc_odds_form"):
             st.success(f"🔍 成功截获 {len(intl_val_matches)} 个高价值选项！请在下方填入竞彩赔率 (未开售或放弃请填0)：")
             
             for vm in intl_val_matches:
                 col1, col2, col3, col4 = st.columns([2, 1, 1.5, 2])
-                col1.markdown(f"**⚽ {vm['home_team']}** vs {vm['away_team']} <br> 🎯 **推荐: {vm['target_label']}**", unsafe_allow_html=True)
+                # 新增了 🕒 比赛时间的渲染显示
+                col1.markdown(f"**⚽ {vm['home_team']}** vs {vm['away_team']} <br> 🕒 {vm['match_time_str']} | 🎯 **推荐: {vm['target_label']}**", unsafe_allow_html=True)
                 col2.markdown(f"国际初盘: `{vm['target_odds']}`")
                 col3.markdown(f"AI胜率: `{vm['prob']*100:.1f}%` <br>国际EV: <span style='color:#2e7d32'>+{vm['ev']*100:.1f}%</span>", unsafe_allow_html=True)
                 
@@ -166,7 +186,7 @@ if st.session_state.get('predict_clicked', False) and st.session_state.get('matc
                 
             submitted = st.form_submit_button("⚙️ 确认以上赔率，生成竞彩【串关精算报告】", type="primary")
 
-        # ================= 5. 竞彩串关精算与避税模块 (胜率优先排序) =================
+        # ================= 5. 竞彩串关精算与避税模块 =================
         valid_jc_matches = []
         for vm in intl_val_matches:
             jc_odds = st.session_state.get(vm['unique_key'], max(1.01, float(vm['target_odds']) - 0.20))
@@ -174,7 +194,7 @@ if st.session_state.get('predict_clicked', False) and st.session_state.get('matc
             
             if jc_ev > 0:
                 valid_jc_matches.append({
-                    'match_name': vm['target_label'],
+                    'match_name': f"({vm['match_time_str']}) {vm['target_label']}",
                     'prob': vm['prob'], 'odds': jc_odds, 'ev': jc_ev
                 })
 
@@ -195,7 +215,6 @@ if st.session_state.get('predict_clicked', False) and st.session_state.get('matc
                     c_ev = calculate_ev(c_prob, eff_odds)
                     if c_ev > 0: combos_2.append({'combo': combo, 'prob': c_prob, 'odds': c_odds, 'eff_odds': eff_odds, 'ev': c_ev})
                 
-                # 排序逻辑修改：首要按概率(prob)降序，次要按收益(ev)降序
                 combos_2.sort(key=lambda x: (x['prob'], x['ev']), reverse=True)
                 for c in combos_2[:20]:
                     with st.container(border=True):
@@ -216,7 +235,6 @@ if st.session_state.get('predict_clicked', False) and st.session_state.get('matc
                         c_ev = calculate_ev(c_prob, eff_odds)
                         if c_ev > 0: combos_3.append({'combo': combo, 'prob': c_prob, 'odds': c_odds, 'eff_odds': eff_odds, 'ev': c_ev})
                     
-                    # 排序逻辑修改：首要按概率(prob)降序，次要按收益(ev)降序
                     combos_3.sort(key=lambda x: (x['prob'], x['ev']), reverse=True)
                     for c in combos_3[:20]:
                         with st.container(border=True):
