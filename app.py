@@ -73,8 +73,17 @@ def calculate_kelly(prob, odds, fraction=0.25):
 
 # ================= 4. 实时盘口侦察与页面展示 =================
 st.sidebar.header("⚙️ 侦察设置")
-selected_league = st.sidebar.selectbox("选择要侦察的联赛:", 
-                                     ["soccer_epl (英超)", "soccer_spain_la_liga (西甲)", "soccer_uefa_champs_league (欧冠)"])
+selected_league = st.sidebar.selectbox("选择要侦察的联赛:", [
+    "soccer_epl (英超)", 
+    "soccer_spain_la_liga (西甲)", 
+    "soccer_germany_bundesliga (德甲)", 
+    "soccer_italy_serie_a (意甲)", 
+    "soccer_france_ligue_one (法甲)", 
+    "soccer_uefa_champs_league (欧冠)", 
+    "soccer_netherlands_eredivisie (荷甲)", 
+    "soccer_portugal_primeira_liga (葡超)", 
+    "soccer_efl_champ (英冠)"
+])
 league_key = selected_league.split(" ")[0]
 
 if st.sidebar.button("🚀 一键预测今日赛事"):
