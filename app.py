@@ -118,18 +118,41 @@ if st.sidebar.button("🚀 一键预测今日赛事"):
                 ev = calculate_ev(home_win_prob, home_odds)
                 kelly = calculate_kelly(home_win_prob, home_odds)
                 
-                # 渲染 UI 卡片
+               # 渲染 UI 卡片
                 with st.container():
                     st.markdown(f"### {home_team} (主) vs {away_team}")
                     col1, col2, col3 = st.columns(3)
-                    col1.metric(label=f"机构主胜赔率 ({bookmaker['title']})", value=f"{home_odds}")
+                    col1.metric(label=f"国际初盘 ({bookmaker['title']})", value=f"{home_odds}")
                     col2.metric(label="AI 算出真实主胜率", value=f"{home_win_prob*100:.1f}%")
                     
                     if ev > 0:
-                        col3.success(f"🔥 发现价值 (EV: +{ev*100:.1f}%)")
-                        st.info(f"💰 **系统建议下注仓位**: 总本金的 **{kelly*100:.2f}%** 买主胜")
+                        col3.success(f"🔥 国际盘发现价值 (EV: +{ev*100:.1f}%)")
+                        
+                        # --- 新增：中国竞彩二次验算模块 ---
+                        with st.expander("🇨🇳 点击进行【竞彩真实收益】二次验算", expanded=True):
+                            st.caption("提示：由于竞彩抽水较高，国际盘有价值的比赛，在竞彩不一定有价值。")
+                            # 生成一个独一无二的 key 防止报错
+                            unique_key = f"jc_{home_team}_{away_team}"
+                            
+                            # 提供输入框，默认值比国际赔率低 0.2 作为竞彩预估
+                            jingcai_odds = st.number_input(
+                                f"👉 请输入体彩店当前开出的【{home_team} 胜】赔率：", 
+                                min_value=1.01, 
+                                step=0.01, 
+                                value=max(1.01, float(home_odds) - 0.20), 
+                                key=unique_key
+                            )
+                            
+                            # 重新计算竞彩版本的数据
+                            jc_ev = calculate_ev(home_win_prob, jingcai_odds)
+                            jc_kelly = calculate_kelly(home_win_prob, jingcai_odds)
+                            
+                            if jc_ev > 0:
+                                st.success(f"✅ 竞彩依然有投资价值！\n\n **竞彩预期收益率 (EV)**: +{jc_ev*100:.2f}% \n\n **凯利公式建议仓位**: 拿出总本金的 **{jc_kelly*100:.2f}%** 去体彩店下注！")
+                            else:
+                                st.error(f"❌ 警告：竞彩抽水过高，价值已被吞噬！\n\n **竞彩预期收益率 (EV)**: {jc_ev*100:.2f}% (长期必亏) \n\n **系统指令**: 坚决放弃下注！")
                     else:
-                        col3.error(f"❌ 无投资价值 (EV: {ev*100:.1f}%)")
+                        col3.error(f"❌ 国际盘无投资价值，直接放弃 (EV: {ev*100:.1f}%)")
                     st.divider()
     else:
         st.error(f"获取 API 数据失败: {resp.status_code}")
