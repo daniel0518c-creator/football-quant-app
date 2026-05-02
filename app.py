@@ -3,12 +3,12 @@ import pandas as pd
 import psycopg2
 import requests
 from sklearn.ensemble import RandomForestClassifier
-import itertools # 新增：用于计算串关排列组合
+import itertools
 
 # ================= 1. 页面 UI 初始化 =================
 st.set_page_config(page_title="AI 足球量化投注看板", page_icon="⚽", layout="wide")
-st.title("⚽ 智能足球量化投注看板 (全欧联赛+竞彩精算版)")
-st.markdown("通过结合 **Elo 战力模型** 与 **The Odds API 实时盘口**，自动寻找价值投注，并支持竞彩 2串1/3串1 与扣税收益重估。")
+st.title("⚽ 智能足球量化投注看板 (极速串关精算版)")
+st.markdown("通过结合 **Elo 战力模型** 与 **The Odds API 实时盘口**，自动寻找价值投注，并提供防卡顿的竞彩串关精算。")
 
 # 从云端安全环境中读取秘密 Key
 DB_URI = st.secrets["DB_URI"]
@@ -65,38 +65,25 @@ def calculate_ev(prob, odds): return (prob * odds) - 1
 
 # ================= 4. 实时盘口侦察与页面展示 =================
 st.sidebar.header("⚙️ 侦察设置")
-
-# 定义支持的联赛列表
 league_options = [
-    "soccer_epl (英超)", 
-    "soccer_spain_la_liga (西甲)", 
-    "soccer_germany_bundesliga (德甲)", 
-    "soccer_italy_serie_a (意甲)", 
-    "soccer_france_ligue_one (法甲)", 
-    "soccer_uefa_champs_league (欧冠)", 
-    "soccer_netherlands_eredivisie (荷甲)", 
-    "soccer_portugal_primeira_liga (葡超)", 
-    "soccer_efl_champ (英冠)"
+    "soccer_epl (英超)", "soccer_spain_la_liga (西甲)", "soccer_germany_bundesliga (德甲)", 
+    "soccer_italy_serie_a (意甲)", "soccer_france_ligue_one (法甲)", "soccer_uefa_champs_league (欧冠)", 
+    "soccer_netherlands_eredivisie (荷甲)", "soccer_portugal_primeira_liga (葡超)", "soccer_efl_champ (英冠)"
 ]
 
-# 新增：一键扫描所有联赛选项
 selected_league = st.sidebar.selectbox("选择要侦察的联赛:", ["🌟 全部核心联赛 (一键扫描)"] + league_options)
 
-if st.sidebar.button("🚀 一键预测今日赛事"):
+if st.sidebar.button("🚀 一键提取国际盘高价值比赛"):
     st.session_state['predict_clicked'] = True
     st.session_state['matches_data'] = []
     
-    # 判断是单联赛还是全联赛
     if "全部核心联赛" in selected_league:
         leagues_to_fetch = [l.split(" ")[0] for l in league_options]
-        st.sidebar.warning("注意：全盘扫描将一次性消耗 9 次 API 请求额度。")
+        st.sidebar.warning("全盘扫描将一次性消耗 9 次 API 额度。")
     else:
         leagues_to_fetch = [selected_league.split(" ")[0]]
     
-    # 进度条设计
-    progress_text = "正在连线欧洲博彩公司..."
-    my_bar = st.progress(0, text=progress_text)
-    
+    my_bar = st.progress(0, text="正在连线欧洲博彩公司...")
     all_fetched_matches = []
     for i, l_key in enumerate(leagues_to_fetch):
         url = f"https://api.the-odds-api.com/v4/sports/{l_key}/odds/?apiKey={ODDS_API_KEY}&regions=eu&markets=h2h"
@@ -108,128 +95,110 @@ if st.sidebar.button("🚀 一键预测今日赛事"):
     my_bar.empty()
     st.session_state['matches_data'] = all_fetched_matches
 
-# 只要点击过按钮，且缓存里有数据，执行以下渲染逻辑
+# --- 核心优化区：分离国际盘筛选与竞彩二次输入 ---
 if st.session_state.get('predict_clicked', False) and st.session_state.get('matches_data') is not None:
-    st.subheader("📡 实时盘口侦察报告 (单场分析)")
+    st.subheader("📡 第一阶段：国际盘价值初筛")
     matches = st.session_state['matches_data']
     
-    # 建立一个“购物车”，专门存放竞彩验证依然 EV>0 的比赛
-    valid_jc_matches = []
-    
-    if not matches:
-        st.info("🤷 目前所选联赛没有即将开打的比赛盘口。")
+    intl_val_matches = []
+    for match in matches:
+        home_team, away_team = match['home_team'], match['away_team']
+        try:
+            bookmaker = match['bookmakers'][0]
+            home_odds = next(item['price'] for item in bookmaker['markets'][0]['outcomes'] if item['name'] == home_team)
+        except: continue 
+        
+        ht_elo, at_elo = elo_dict.get(home_team, 1500), elo_dict.get(away_team, 1500)
+        features = pd.DataFrame({'home_elo': [ht_elo], 'away_elo': [at_elo], 'elo_diff': [ht_elo - at_elo]})
+        probs = model.predict_proba(features)[0]
+        home_win_prob = probs[list(classes).index('HomeWin')]
+        ev = calculate_ev(home_win_prob, home_odds)
+        
+        if ev > 0:
+            intl_val_matches.append({
+                'home_team': home_team, 'away_team': away_team,
+                'bookmaker': bookmaker['title'], 'home_odds': home_odds,
+                'prob': home_win_prob, 'ev': ev,
+                'unique_key': f"jc_{home_team}_{away_team}"
+            })
+
+    if not intl_val_matches:
+        st.info("🤷 目前所选联赛中，没有发现国际盘具备投资价值的比赛。")
     else:
-        for match in matches:
-            home_team, away_team = match['home_team'], match['away_team']
-            try:
-                bookmaker = match['bookmakers'][0]
-                home_odds = next(item['price'] for item in bookmaker['markets'][0]['outcomes'] if item['name'] == home_team)
-            except:
-                continue 
+        # 使用 st.form 彻底阻断输入时的页面卡顿刷新
+        with st.form("jc_odds_form"):
+            st.success(f"🔍 成功截获 {len(intl_val_matches)} 场国际盘有价值的比赛！请在下方微调竞彩赔率：")
             
-            ht_elo = elo_dict.get(home_team, 1500)
-            at_elo = elo_dict.get(away_team, 1500)
-            
-            features = pd.DataFrame({'home_elo': [ht_elo], 'away_elo': [at_elo], 'elo_diff': [ht_elo - at_elo]})
-            probs = model.predict_proba(features)[0]
-            home_win_prob = probs[list(classes).index('HomeWin')]
-            
-            ev = calculate_ev(home_win_prob, home_odds)
-            
-            # 只显示国际盘有价值的比赛，过滤掉垃圾比赛
-            if ev > 0:
-                with st.container():
-                    st.markdown(f"### ⚽ {home_team} (主) vs {away_team}")
-                    col1, col2, col3 = st.columns(3)
-                    col1.metric(label=f"国际初盘 ({bookmaker['title']})", value=f"{home_odds}")
-                    col2.metric(label="AI 主胜率", value=f"{home_win_prob*100:.1f}%")
-                    col3.success(f"🔥 国际盘有价值 (EV: +{ev*100:.1f}%)")
-                    
-                    with st.expander("🇨🇳 竞彩真实收益二次验算", expanded=True):
-                        unique_key = f"jc_{home_team}_{away_team}"
-                        jingcai_odds = st.number_input(
-                            f"👉 输入体彩店【{home_team} 胜】赔率：", 
-                            min_value=1.01, step=0.01, 
-                            value=max(1.01, float(home_odds) - 0.20), 
-                            key=unique_key
-                        )
-                        jc_ev = calculate_ev(home_win_prob, jingcai_odds)
-                        
-                        if jc_ev > 0:
-                            st.success(f"✅ 竞彩单关合格 (EV: +{jc_ev*100:.2f}%)，已自动加入下方串关精算池！")
-                            # 将合格的比赛加入购物车
-                            valid_jc_matches.append({
-                                'match_name': f"{home_team} 胜",
-                                'prob': home_win_prob,
-                                'odds': jingcai_odds
-                            })
-                        else:
-                            st.error(f"❌ 竞彩抽水过高，放弃 (EV: {jc_ev*100:.2f}%)")
-                    st.divider()
+            for vm in intl_val_matches:
+                col1, col2, col3, col4 = st.columns([2, 1, 1.5, 2])
+                col1.markdown(f"**⚽ {vm['home_team']}** vs {vm['away_team']}")
+                col2.markdown(f"国际初盘: `{vm['home_odds']}`")
+                col3.markdown(f"AI胜率: `{vm['prob']*100:.1f}%` <br>国际EV: <span style='color:#2e7d32'>+{vm['ev']*100:.1f}%</span>", unsafe_allow_html=True)
+                
+                default_jc = max(1.01, float(vm['home_odds']) - 0.20)
+                col4.number_input("🇨🇳 竞彩主胜赔率", min_value=1.01, step=0.01, value=default_jc, key=vm['unique_key'], label_visibility="collapsed")
+                st.divider()
+                
+            submitted = st.form_submit_button("⚙️ 确认以上赔率，生成竞彩【串关精算报告】", type="primary")
 
-    # ================= 5. 竞彩串关精算与避税模块 =================
-    if len(valid_jc_matches) >= 2:
-        st.header("🔗 竞彩串关智能精算 (自动组合验证池)")
-        st.markdown("以下组合均由上方**竞彩验证合格**的单场比赛自动交叉组合而成。")
-        
-        # 扣税开关
-        apply_tax = st.toggle("💸 模拟大额中奖扣税 (若单注奖金超过3000元，强制扣除20%所得税)")
-        tax_multiplier = 0.8 if apply_tax else 1.0
-        
-        col_2, col_3 = st.columns(2)
-        
-        # --- 2串1 分析 ---
-        with col_2:
-            st.subheader("🔥 推荐 2串1 组合")
-            combos_2 = list(itertools.combinations(valid_jc_matches, 2))
-            valid_2_count = 0
+        # ================= 5. 竞彩串关精算与避税模块 (极速渲染版) =================
+        # 只要表单被渲染过，我们就可以从 session_state 提取数据计算
+        valid_jc_matches = []
+        for vm in intl_val_matches:
+            # 获取用户填写的竞彩赔率（默认取国际盘-0.2）
+            jc_odds = st.session_state.get(vm['unique_key'], max(1.01, float(vm['home_odds']) - 0.20))
+            jc_ev = calculate_ev(vm['prob'], jc_odds)
             
-            for combo in combos_2:
-                combo_prob = combo[0]['prob'] * combo[1]['prob']
-                combo_odds = combo[0]['odds'] * combo[1]['odds']
+            if jc_ev > 0:
+                valid_jc_matches.append({
+                    'match_name': f"{vm['home_team']} 胜",
+                    'prob': vm['prob'], 'odds': jc_odds, 'ev': jc_ev
+                })
+
+        if len(valid_jc_matches) >= 2:
+            st.header("🔗 竞彩串关智能精算 (Top 20 收益榜)")
+            apply_tax = st.toggle("💸 模拟大额中奖扣税 (奖金超3000强制扣20%)")
+            tax_multiplier = 0.8 if apply_tax else 1.0
+            
+            col_2, col_3 = st.columns(2)
+            
+            with col_2:
+                st.subheader("🔥 优质 2串1")
+                combos_2 = []
+                for combo in itertools.combinations(valid_jc_matches, 2):
+                    c_prob = combo[0]['prob'] * combo[1]['prob']
+                    c_odds = combo[0]['odds'] * combo[1]['odds']
+                    eff_odds = c_odds * tax_multiplier
+                    c_ev = calculate_ev(c_prob, eff_odds)
+                    if c_ev > 0: combos_2.append({'combo': combo, 'prob': c_prob, 'odds': c_odds, 'eff_odds': eff_odds, 'ev': c_ev})
                 
-                # 扣税计算
-                effective_odds = combo_odds * tax_multiplier
-                combo_ev = calculate_ev(combo_prob, effective_odds)
-                
-                if combo_ev > 0:
-                    valid_2_count += 1
+                # 核心优化：按 EV 排序，只渲染前 20 个！绝不卡顿！
+                combos_2.sort(key=lambda x: x['ev'], reverse=True)
+                for c in combos_2[:20]:
                     with st.container(border=True):
-                        st.markdown(f"**[1]** {combo[0]['match_name']}  \n**[2]** {combo[1]['match_name']}")
-                        st.markdown(f"**综合胜率**: {combo_prob*100:.1f}% | **综合赔率**: {combo_odds:.2f}")
-                        if apply_tax:
-                            st.warning(f"🧾 税后赔率: {effective_odds:.2f} | **税后 EV**: +{combo_ev*100:.2f}%")
-                        else:
-                            st.success(f"📈 **预期收益 (EV)**: +{combo_ev*100:.2f}%")
-                            
-            if valid_2_count == 0:
-                st.error("开启扣税后，没有任何 2串1 组合具备投资价值！请降低预期或减小注水避免超 3000 元。")
+                        st.markdown(f"**[1]** {c['combo'][0]['match_name']} <br>**[2]** {c['combo'][1]['match_name']}", unsafe_allow_html=True)
+                        st.caption(f"胜率: {c['prob']*100:.1f}% | 原始赔率: {c['odds']:.2f}")
+                        if apply_tax: st.warning(f"🧾 税后赔率: {c['eff_odds']:.2f} | **税后 EV: +{c['ev']*100:.2f}%**")
+                        else: st.success(f"📈 **预期收益 (EV): +{c['ev']*100:.2f}%**")
+                if not combos_2: st.error("当前赔率和扣税条件下，无盈利 2串1 组合。")
 
-        # --- 3串1 分析 ---
-        with col_3:
-            st.subheader("🚀 推荐 3串1 组合")
-            if len(valid_jc_matches) >= 3:
-                combos_3 = list(itertools.combinations(valid_jc_matches, 3))
-                valid_3_count = 0
-                
-                for combo in combos_3:
-                    combo_prob = combo[0]['prob'] * combo[1]['prob'] * combo[2]['prob']
-                    combo_odds = combo[0]['odds'] * combo[1]['odds'] * combo[2]['odds']
+            with col_3:
+                st.subheader("🚀 优质 3串1")
+                if len(valid_jc_matches) >= 3:
+                    combos_3 = []
+                    for combo in itertools.combinations(valid_jc_matches, 3):
+                        c_prob = combo[0]['prob'] * combo[1]['prob'] * combo[2]['prob']
+                        c_odds = combo[0]['odds'] * combo[1]['odds'] * combo[2]['odds']
+                        eff_odds = c_odds * tax_multiplier
+                        c_ev = calculate_ev(c_prob, eff_odds)
+                        if c_ev > 0: combos_3.append({'combo': combo, 'prob': c_prob, 'odds': c_odds, 'eff_odds': eff_odds, 'ev': c_ev})
                     
-                    effective_odds = combo_odds * tax_multiplier
-                    combo_ev = calculate_ev(combo_prob, effective_odds)
-                    
-                    if combo_ev > 0:
-                        valid_3_count += 1
+                    # 同样只渲染前 20 个最高收益组合
+                    combos_3.sort(key=lambda x: x['ev'], reverse=True)
+                    for c in combos_3[:20]:
                         with st.container(border=True):
-                            st.markdown(f"**[1]** {combo[0]['match_name']}  \n**[2]** {combo[1]['match_name']}  \n**[3]** {combo[2]['match_name']}")
-                            st.markdown(f"**综合胜率**: {combo_prob*100:.1f}% | **综合赔率**: {combo_odds:.2f}")
-                            if apply_tax:
-                                st.warning(f"🧾 税后赔率: {effective_odds:.2f} | **税后 EV**: +{combo_ev*100:.2f}%")
-                            else:
-                                st.success(f"📈 **预期收益 (EV)**: +{combo_ev*100:.2f}%")
-                
-                if valid_3_count == 0:
-                    st.error("开启扣税后，没有任何 3串1 组合具备投资价值！")
-            else:
-                st.info("合格的单场比赛不足 3 场，无法生成 3串1 组合。")
+                            st.markdown(f"**[1]** {c['combo'][0]['match_name']} <br>**[2]** {c['combo'][1]['match_name']} <br>**[3]** {c['combo'][2]['match_name']}", unsafe_allow_html=True)
+                            st.caption(f"胜率: {c['prob']*100:.1f}% | 原始赔率: {c['odds']:.2f}")
+                            if apply_tax: st.warning(f"🧾 税后赔率: {c['eff_odds']:.2f} | **税后 EV: +{c['ev']*100:.2f}%**")
+                            else: st.success(f"📈 **预期收益 (EV): +{c['ev']*100:.2f}%**")
+                    if not combos_3: st.error("当前条件下，无盈利 3串1 组合。")
